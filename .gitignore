@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Build artefacts
+build/
+dist/
+*.spec.bak
+
+# Model weights (use model_manager to fetch; do not commit)
+resources/models/*.onnx
+resources/models/*.pt
+resources/models/*.pth
+
+# Bundled binaries (fetch at build time)
+resources/ffmpeg/*.exe
+resources/ffmpeg/*.dll
+
+# 使用者專案輸出
+*.zgproj/
+
+# Claude Code 個人設定
+.claude/settings.local.json
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Signing secrets (never commit)
+packaging/*.pfx
+packaging/*.p12
+packaging/secrets.*
+
+# Logs / local settings
+*.log
+.env
+.env.local
