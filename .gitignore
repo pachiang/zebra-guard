@@ -48,3 +48,25 @@ packaging/secrets.*
 *.log
 .env
 .env.local
+
+# Zero-shot detector runtime artifacts (outputs of scripts/zero_shot_detect.py
+# and annotate_events.py). Do NOT commit; reproducible from the script + video.
+zs_*.json
+zs_*.mp4
+zs_*.png
+zero_shot_*.json
+zero_shot_*.mp4
+zero_shot_*.png
+annot_sample_*.png
+annotate_taiwan.log
+debug_*.png
+taiwan_frame_*.png
+taiwan_preview_*.png
+taiwan_events_annotated*.mp4
+
+# Auto-downloaded ultralytics weights (re-fetched on demand)
+/yolo11n.pt
+/yolo*.pt
+
+# Demo project directory
+demo.zgproj/
