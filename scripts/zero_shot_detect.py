@@ -24,8 +24,10 @@ import argparse
 import json
 import math
 import sys
+import threading
 import time
 from collections import defaultdict, deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -33,6 +35,15 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
+
+# progress_cb(stage: str, current: int, total: int, hits: int) -> None
+#   stage ∈ {"loading_mask", "loading_yolo", "analyzing", "annotating", "done"}
+#   current/total 的單位由 stage 決定:analyzing 為 frame index;annotating 為已寫入幀
+ProgressCallback = Callable[[str, int, int, int], None]
+
+
+class Cancelled(Exception):
+    """Raised internally when cancel_event is set. Caller should catch this."""
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -73,14 +84,22 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def load_mask2former(model_name: str, device: torch.device):
+def load_mask2former(
+    model_name: str,
+    device: torch.device,
+    progress_cb: ProgressCallback | None = None,
+):
     from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation
 
     log(f"[models] loading {model_name} ...")
+    if progress_cb is not None:
+        progress_cb("loading_mask", 0, 1, 0)
     t0 = time.monotonic()
     processor = AutoImageProcessor.from_pretrained(model_name)
     model = Mask2FormerForUniversalSegmentation.from_pretrained(model_name).to(device).eval()
     log(f"[models] mask2former ready in {time.monotonic() - t0:.1f}s on {device}")
+    if progress_cb is not None:
+        progress_cb("loading_mask", 1, 1, 0)
 
     id2label = model.config.id2label
     zebra_ids: list[int] = []
@@ -274,7 +293,7 @@ def run(
     imgsz: int,
     merge_gap_sec: float,
     min_event_frames: int,
-    output_json: Path,
+    output_json: Path | None,
     preview_video: Path | None,
     preview_max_seconds: float,
     exclude_ego: bool,
@@ -288,15 +307,21 @@ def run(
     rider_foot_margin_px: int,
     person_conf: float,
     mask_imgsz: int,
-) -> None:
+    progress_cb: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
+) -> dict:
     device = torch.device(device_str)
 
-    processor, mask_model, zebra_ids = load_mask2former(model_name, device)
+    processor, mask_model, zebra_ids = load_mask2former(model_name, device, progress_cb)
 
     from ultralytics import YOLO
 
     log(f"[models] loading YOLO {yolo_weights} ...")
+    if progress_cb is not None:
+        progress_cb("loading_yolo", 0, 1, 0)
     yolo = YOLO(yolo_weights)
+    if progress_cb is not None:
+        progress_cb("loading_yolo", 1, 1, 0)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -343,6 +368,11 @@ def run(
     idx = 0
 
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            cap.release()
+            if writer is not None:
+                writer.release()
+            raise Cancelled()
         if idx >= max_frame:
             break
         ok, frame = cap.read()
@@ -589,6 +619,8 @@ def run(
             eta = (max_frame - idx) / max(rate, 1e-6)
             log(f"[run] {idx}/{max_frame} ({100*idx/max_frame:5.1f}%) "
                 f"{rate:.1f} fps, eta {eta:.0f}s, hits={len(frame_hits)}")
+            if progress_cb is not None:
+                progress_cb("analyzing", idx, max_frame, len(frame_hits))
 
     cap.release()
     if writer is not None:
@@ -665,9 +697,12 @@ def run(
             "mask_imgsz": mask_imgsz,
         },
     }
-    output_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    if output_json is not None:
+        output_json.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        log(f"[done] report: {output_json}")
     log(f"[done] {len(frame_hits)} frame hits → {len(events)} events")
-    log(f"[done] report: {output_json}")
     for i, e in enumerate(events):
         log(f"  #{i+1}: frames {e.start_frame}-{e.end_frame}  "
             f"t=[{e.start_sec:.2f}s–{e.end_sec:.2f}s]  "
@@ -675,14 +710,22 @@ def run(
             f"peds={e.ped_track_ids}  vehs={e.veh_track_ids}")
     if preview_video is not None:
         log(f"[done] preview: {preview_video}")
+    if progress_cb is not None:
+        progress_cb("analyzing", max_frame, max_frame, len(frame_hits))
 
     # ------- Second pass: write fully-annotated video -------
     if cache_enabled and annotated_out is not None:
         _write_annotated(
             video_path, annotated_out, frame_records, mask_cache,
             events, fps, W, H, max_frame, dilate_px,
+            progress_cb=progress_cb, cancel_event=cancel_event,
         )
         log(f"[done] annotated: {annotated_out}")
+
+    if progress_cb is not None:
+        progress_cb("done", max_frame, max_frame, len(frame_hits))
+
+    return report
 
 
 def _write_annotated(
@@ -696,6 +739,8 @@ def _write_annotated(
     H: int,
     max_frame: int,
     dilate_px: int,
+    progress_cb: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     """Re-read source video and produce an annotated mp4 combining masks + boxes + events."""
     log(f"[annot] second pass → {out_path}")
@@ -723,6 +768,10 @@ def _write_annotated(
     last_rec: FrameRecord | None = None
     written = 0
     for idx in range(max_frame):
+        if cancel_event is not None and cancel_event.is_set():
+            cap.release()
+            writer.release()
+            raise Cancelled()
         ok, frame = cap.read()
         if not ok:
             break
@@ -793,6 +842,8 @@ def _write_annotated(
         written += 1
         if written % 600 == 0:
             log(f"[annot] {written}/{max_frame} ({100*written/max_frame:.1f}%)")
+        if progress_cb is not None and written % 120 == 0:
+            progress_cb("annotating", written, max_frame, 0)
 
     cap.release()
     writer.release()

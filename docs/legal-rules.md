@@ -20,9 +20,12 @@
 
 - 單一枕木紋寬度:約 40 cm `[需查證]`
 - 枕木紋之間的間隙:約 60 cm `[需查證]`
-- 三個枕木紋的**累計距離**(含間隙):約 **3 公尺** `[需查證,此為 app 預設值]`
+- 三個枕木紋的**累計距離**(含間隙):約 **3 公尺** `[需查證]`
 
-> **實作注意**:`violation_rules.py` 的預設 `yield_distance_meters = 3.0`,但必須可由使用者在設定中調整。因為不同路口的實際幾何會讓「三個枕木紋」落在 1.2 m 到 3 m 之間。
+> **實作注意**:本 app 的 MVP **不做 homography 校正**,因此無法精確換算「3 公尺」。改以**斑馬線 mask 膨脹 `dilate_px` 像素後,車輛的 bbox 底部 strip 是否壓到該 mask**作為「過於接近」的判斷。此近似法有以下特性:
+> - `dilate_px`(預設 20 px,於 720p 影像)在常見 dashcam 視角下,大致對應「正要進入斑馬線到已經壓線」這個範圍,並非精確 3 公尺。
+> - 近處誤差較小,遠處(如對向車道)像素稀疏時誤差放大;幸好對向車道本就不是本 app 要判的目標。
+> - 若使用者的行車記錄器焦段特殊(廣角過寬、長焦望遠),像素↔實際距離對應關係會失真。
 
 ### 2.3 近年法規更新摘要 `[需查證]`
 2023 年起已多次修訂對「未停讓行人」的認定與罰則(含罰鍰金額調升、列入記點項目)。實作時請參考該年份後的最新版本,避免以舊條文資訊填入檢舉書。
@@ -33,25 +36,31 @@
 
 候選判定的三個條件(全部符合才成立):
 
-### 條件 A — 行人位於穿越道上
-- 行人 bbox 底邊中心點落在使用者設定的 ROI 多邊形內
-- 連續至少 `min_pedestrian_frames` 幀成立(預設 3 幀,避免單幀偽陽性)
+### 條件 A — 行人位於穿越道上(自動偵測的 mask 內)
+- YOLO 偵測到 class=person、confidence ≥ `person_conf`(預設 0.35)、且非騎士(rider 過濾見 architecture § 6.3)
+- 該 person bbox 的底部 strip(下方 15% 區域)多數像素落在 Mask2Former 所產生的斑馬線 **dilated mask** 的某個 connected component X 內
 
-### 條件 B — 車輛過於接近
-- 車輛 bbox 底邊中心點與 ROI 多邊形之**世界座標最近距離** ≤ `yield_distance_meters`(預設 3.0 m,使用 homography 換算)
-- 計算時忽略完全停止在 ROI 後方的車輛(由條件 C 的速度判斷處理)
+### 條件 B — 車輛同時壓到**同一片**斑馬線
+- YOLO 偵測到 class ∈ {car, bus, truck, motorcycle, bicycle}、且非 ego vehicle
+- 該車輛 bbox 的底部 strip(下方 20% 區域)多數像素落在 **同一 component X** 內(不同斑馬線之間不互相觸發,避免路口兩側斑馬線互相誤判)
 
-### 條件 C — 車輛未停讓
-- 車輛速度(由連續幀的 bbox 底邊位移 + homography + fps 估算)在「最接近行人的那一幀」前 `window_before_sec` 內的**最低速度** > `stop_threshold_kmh`(預設 5 km/h)
-- 即「車輛接近行人時沒有有效減速至近乎停止」
+### 條件 C — 車輛仍在移動(未停讓)
+- 該車輛的軌跡中心(bbox 中心)相對前一幀位移 ≥ `moving_px` 像素(預設 2.0)
+- 即:完全停止在 mask 上的車輛會被視為已停讓,不成立違規候選
+
+### 聚合規則
+- 連續命中經 `merge_gap_sec`(預設 0.6 秒)以內容忍度聚合為一筆事件
+- 事件長度 < `min_event_frames`(預設 2 幀)則視為閃爍誤判,丟棄
 
 ## 4. 已知限制與不判定情境
 
 - **單車 / 機車 / 電動代步車**:是否視為「車輛」隨法規更新,實作時 class 要可設定
-- **行人非從穿越道進入**:例如行人從路邊穿越非 ROI 區域,不計
-- **行人已通過**:ROI 內已沒有行人時車輛通過,不計
+- **行人非從穿越道進入**:例如行人從路邊穿越非斑馬線 mask 區域,不計
+- **斑馬線未被偵測**:Mask2Former 在嚴重眩光、雨霧、夜間、被車輛完全遮擋等情境下可能漏抓該幀 mask;使用者會在 Review 階段看到事件清單相對稀疏時才察覺
+- **行人已通過**:mask 內已沒有行人時車輛通過,不計
 - **號誌違規**:本 app **不判定**紅燈右轉等號誌違規,僅判定「行經穿越道未禮讓」
-- **夜間 / 強逆光 / 雨雪**:偵測準確度會下降,Review Deck 階段使用者務必人工確認
+- **夜間 / 強逆光 / 雨雪**:mask 與偵測準確度同步下降,Review Deck 階段使用者務必人工確認
+- **停讓後起步**:車輛於 mask 上短暫停下(速度 < `moving_px`)後又起步,**該起步瞬間可能再次觸發規則**。這是已知限制;Review Deck 可人工否決
 
 ## 5. 免責與提報建議
 
@@ -59,21 +68,25 @@
 - 警方對檢舉成立與否有裁量權,影像中需清晰可辨識車牌、時間、地點
 - 使用者在 Review Deck 階段應親自判斷:
   1. 影像是否清晰、角度是否能證明違規
-  2. 行人是否真的在穿越(非逗留、非從旁經過)
+  2. 行人是否真的在穿越(非逗留、非從旁經過、非騎士)
   3. 車輛是否真的未停讓(非已完全停止後才起步)
+  4. 是否為自車(ego vehicle),雖有過濾仍可能漏掉
 - 參見 `disclaimer.md`
 
 ## 6. 實作對照表
 
 | 規則概念 | 程式位置 | 可調參數 |
 |---|---|---|
-| ROI 判定 | `ml/roi.py` | ROI polygon 由使用者繪製 |
-| 距離換算 | `ml/homography.py` | 使用者校正的變換矩陣 |
-| 違規判定 | `ml/violation_rules.py` | `yield_distance_meters`、`stop_threshold_kmh`、`window_before_sec`、`min_pedestrian_frames` |
-| 類別過濾 | `ml/detection.py` | 使用者可設定 vehicle classes |
+| 斑馬線自動分割 | `ml/crosswalk_seg.py` | `mask_model`、`mask_every`、`mask_imgsz`、`min_mask_area_frac` |
+| 膨脹 / 分量 | `ml/crosswalk_seg.py` | `dilate_px` |
+| 偵測 / 追蹤 | `ml/detection.py` | `yolo_weights`、`conf`、`person_conf`、`imgsz` |
+| Ego / Rider 過濾 | `ml/detection.py` | `ego_*`、`rider_*` |
+| 同一幀命中規則 | `ml/violation_rules.py` | `moving_px` |
+| 事件聚合 | `ml/violation_rules.py` | `merge_gap_sec`、`min_event_frames` |
+| 參數 preset | `scripts/presets/v7_baseline_params.json` | 一整組預設值(MVP 固定使用 v7) |
 
 ## 7. 待辦 (TODO)
 
 - [ ] 實作前由人審閱現行第 44 條文字,更新本文件的 `[需查證]` 項目
 - [ ] 撰寫檢舉書模板時,填入該年度現行罰鍰金額(或留空由使用者填)
-- [ ] 加入「車輛已完全停止等候」的例外判定邏輯
+- [ ] Review Deck 的 UI 提示文案中明確告知「本判定以像素接近為近似,非精確的三枕木紋距離」

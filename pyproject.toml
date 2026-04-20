@@ -18,6 +18,8 @@ dependencies = [
 # 純數學測試不需要,故放 optional。
 inference = [
     "ultralytics>=8.3",
+    "transformers>=4.44",  # Mask2Former for 斑馬線自動分割
+    "pillow>=10.0",        # zero_shot_detect 依賴 PIL.Image
 ]
 ui = [
     "PySide6>=6.7",

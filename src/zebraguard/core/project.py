@@ -59,6 +59,27 @@ CREATE TABLE IF NOT EXISTS violations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_violations_start ON violations(start_sec);
+
+-- v7 zero-shot pipeline 輸出。
+-- 與 violations 表分開存放:violations 對應舊的 homography 管線(保留以相容 CLI / tests),
+-- events 對應現行 v7 preset 的結果,UI 全部走這張表。
+CREATE TABLE IF NOT EXISTS events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    start_frame     INTEGER NOT NULL,
+    end_frame       INTEGER NOT NULL,
+    start_sec       REAL    NOT NULL,
+    end_sec         REAL    NOT NULL,
+    min_distance_px REAL    NOT NULL,
+    peak_speed_px   REAL    NOT NULL,
+    ped_track_ids   TEXT    NOT NULL DEFAULT '[]',
+    veh_track_ids   TEXT    NOT NULL DEFAULT '[]',
+    user_status     TEXT    NOT NULL DEFAULT 'pending'
+        CHECK (user_status IN ('pending', 'accepted', 'rejected')),
+    user_note       TEXT,
+    created_at      TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_sec);
 """
 
 _VIDEO_HASH_BYTES = 8 * 1024 * 1024  # 前 8 MB,對 12 小時影片全 hash 太慢
@@ -263,3 +284,87 @@ class Project:
     @property
     def accepted_violations(self) -> list[dict[str, Any]]:
         return [v for v in self.load_violations() if v["user_status"] == "accepted"]
+
+    # ---- Events (v7 zero-shot pipeline) ------------------------------------
+
+    def save_events(self, events: list[dict[str, Any]]) -> None:
+        """覆蓋儲存 v7 pipeline 的事件清單。
+
+        `events` 的每個元素需含:start_frame / end_frame / start_sec / end_sec /
+        min_distance_px / peak_speed_px / ped_track_ids / veh_track_ids。
+        """
+        with self._conn:
+            self._conn.execute("DELETE FROM events")
+            self._conn.executemany(
+                """INSERT INTO events
+                   (start_frame, end_frame, start_sec, end_sec,
+                    min_distance_px, peak_speed_px, ped_track_ids, veh_track_ids)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        int(e["start_frame"]),
+                        int(e["end_frame"]),
+                        float(e["start_sec"]),
+                        float(e["end_sec"]),
+                        float(e.get("min_distance_px", 0.0)),
+                        float(e.get("peak_speed_px", 0.0)),
+                        json.dumps(list(e.get("ped_track_ids", []))),
+                        json.dumps(list(e.get("veh_track_ids", []))),
+                    )
+                    for e in events
+                ],
+            )
+
+    def load_events(self) -> list[dict[str, Any]]:
+        """含 id、user_status、user_note;ped/veh_track_ids 已 JSON parsed。"""
+        cur = self._conn.execute(
+            """SELECT id, start_frame, end_frame, start_sec, end_sec,
+                      min_distance_px, peak_speed_px, ped_track_ids, veh_track_ids,
+                      user_status, user_note
+               FROM events ORDER BY start_sec, id"""
+        )
+        cols = [c[0] for c in cur.description]
+        rows = [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
+        for r in rows:
+            r["ped_track_ids"] = json.loads(r["ped_track_ids"] or "[]")
+            r["veh_track_ids"] = json.loads(r["veh_track_ids"] or "[]")
+        return rows
+
+    def update_event_status(
+        self, event_id: int, status: str, note: str | None = None
+    ) -> None:
+        if status not in ("pending", "accepted", "rejected"):
+            raise ValueError(f"無效 status: {status}")
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE events SET user_status = ?, user_note = ? WHERE id = ?",
+                (status, note, event_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"找不到 event id={event_id}")
+
+    def update_event_range(
+        self, event_id: int, start_sec: float, end_sec: float, fps: float
+    ) -> None:
+        """使用者於 Review Deck 微調事件起訖時段。frame 欄位同步由 fps 換算。"""
+        if end_sec <= start_sec:
+            raise ValueError("end_sec 必須大於 start_sec")
+        with self._conn:
+            cur = self._conn.execute(
+                """UPDATE events
+                   SET start_sec = ?, end_sec = ?, start_frame = ?, end_frame = ?
+                   WHERE id = ?""",
+                (
+                    float(start_sec),
+                    float(end_sec),
+                    int(round(start_sec * fps)),
+                    int(round(end_sec * fps)),
+                    event_id,
+                ),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"找不到 event id={event_id}")
+
+    @property
+    def accepted_events(self) -> list[dict[str, Any]]:
+        return [e for e in self.load_events() if e["user_status"] == "accepted"]
