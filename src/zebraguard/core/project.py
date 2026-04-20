@@ -367,6 +367,58 @@ class Project:
             if cur.rowcount == 0:
                 raise KeyError(f"找不到 event id={event_id}")
 
+    def insert_event(
+        self,
+        *,
+        start_sec: float,
+        end_sec: float,
+        fps: float,
+        user_status: str = "pending",
+        user_note: str | None = None,
+        ped_track_ids: list[int] | None = None,
+        veh_track_ids: list[int] | None = None,
+        min_distance_px: float = 0.0,
+        peak_speed_px: float = 0.0,
+    ) -> int:
+        """新增一筆事件(多半為使用者手動建立)。回傳 autoincrement 後的 id。
+
+        手動建立的事件通常 track_ids 為空、距離/速度為 0;pipeline 不會也沒必要
+        區分 `_manual` 欄位,因為使用者要的是「我加的」vs「AI 加的」,而 AI 加的
+        事件一定帶 track_ids。`user_note` 若傳 "manual" 之類的字串,UI 還可以更
+        明確地標示。
+        """
+        if end_sec <= start_sec:
+            raise ValueError("end_sec 必須大於 start_sec")
+        if user_status not in ("pending", "accepted", "rejected"):
+            raise ValueError(f"無效 status: {user_status}")
+        with self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO events
+                   (start_frame, end_frame, start_sec, end_sec,
+                    min_distance_px, peak_speed_px, ped_track_ids, veh_track_ids,
+                    user_status, user_note)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    int(round(start_sec * fps)),
+                    int(round(end_sec * fps)),
+                    float(start_sec),
+                    float(end_sec),
+                    float(min_distance_px),
+                    float(peak_speed_px),
+                    json.dumps(list(ped_track_ids or [])),
+                    json.dumps(list(veh_track_ids or [])),
+                    user_status,
+                    user_note,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def delete_event(self, event_id: int) -> None:
+        with self._conn:
+            cur = self._conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+            if cur.rowcount == 0:
+                raise KeyError(f"找不到 event id={event_id}")
+
     def update_event_range(
         self, event_id: int, start_sec: float, end_sec: float, fps: float
     ) -> None:
