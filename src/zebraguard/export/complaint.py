@@ -31,8 +31,8 @@ TEMPLATE = """\
   鄰近地標或門牌:【請填入】
   行政區 / 縣市:【請填入】
 
-五、違規車輛(【請填入】)
-  車牌號碼:【請填入】
+五、違規車輛
+  車牌號碼:{plate_line}
   車種 / 顏色:【請填入】(本程式自動判斷可能有誤,請以影像為準)
 
 六、事件說明(可保留或修改)
@@ -75,6 +75,8 @@ def write_complaint_draft(
     total_events: int,
     app_version: str,
 ) -> None:
+    plate = (event.get("license_plate") or "").strip()
+    plate_line = plate if plate else "【請填入】"
     text = TEMPLATE.format(
         video_name=video_name,
         display_index=event.get("_display_index", event.get("id", 0)),
@@ -82,6 +84,7 @@ def write_complaint_draft(
         start_str=_fmt_timestamp(event["start_sec"]),
         end_str=_fmt_timestamp(event["end_sec"]),
         duration=event["end_sec"] - event["start_sec"],
+        plate_line=plate_line,
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         app_version=app_version,
     )

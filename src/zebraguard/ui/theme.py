@@ -137,6 +137,21 @@ QPushButton[ghost="true"] {{
 }}
 QPushButton[ghost="true"]:hover {{ color: {FG_PRIMARY}; background: {BG_CARD_HI}; }}
 
+QPushButton[chip="true"] {{
+    background: transparent;
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+    padding: 4px 14px;
+    color: {FG_MUTED};
+    font-weight: 500;
+}}
+QPushButton[chip="true"]:hover {{ color: {FG_PRIMARY}; border-color: #4a5162; }}
+QPushButton[chip="true"]:checked {{
+    color: {ACCENT};
+    border: 1px solid {ACCENT};
+    background: rgba(245, 165, 36, 0.08);
+}}
+
 /* Progress bar -------------------------------------------------------- */
 QProgressBar {{
     background: {BG_CARD_HI};

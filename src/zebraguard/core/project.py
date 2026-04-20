@@ -76,11 +76,22 @@ CREATE TABLE IF NOT EXISTS events (
     user_status     TEXT    NOT NULL DEFAULT 'pending'
         CHECK (user_status IN ('pending', 'accepted', 'rejected')),
     user_note       TEXT,
+    license_plate   TEXT,
     created_at      TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_sec);
 """
+
+
+def _migrate_events_table(conn: sqlite3.Connection) -> None:
+    """為既有(schema v1)專案追加後來才加的欄位;SQLite 沒有 IF NOT EXISTS
+    語法,所以用 PRAGMA 查欄位、缺才 ADD。"""
+    cur = conn.execute("PRAGMA table_info(events)")
+    existing = {row[1] for row in cur.fetchall()}
+    if "license_plate" not in existing:
+        conn.execute("ALTER TABLE events ADD COLUMN license_plate TEXT")
+    conn.commit()
 
 _VIDEO_HASH_BYTES = 8 * 1024 * 1024  # 前 8 MB,對 12 小時影片全 hash 太慢
 
@@ -188,6 +199,7 @@ class Project:
         conn = sqlite3.connect(path / "project.db")
         conn.executescript(_SCHEMA)
         conn.commit()
+        _migrate_events_table(conn)
 
         project = cls(path, meta, conn)
         project._save_meta()
@@ -213,6 +225,7 @@ class Project:
 
         conn = sqlite3.connect(db_path)
         conn.executescript(_SCHEMA)  # idempotent,確保表格存在
+        _migrate_events_table(conn)
         return cls(path, meta, conn)
 
     def close(self) -> None:
@@ -340,11 +353,11 @@ class Project:
             )
 
     def load_events(self) -> list[dict[str, Any]]:
-        """含 id、user_status、user_note;ped/veh_track_ids 已 JSON parsed。"""
+        """含 id、user_status、user_note、license_plate;ped/veh_track_ids 已 JSON parsed。"""
         cur = self._conn.execute(
             """SELECT id, start_frame, end_frame, start_sec, end_sec,
                       min_distance_px, peak_speed_px, ped_track_ids, veh_track_ids,
-                      user_status, user_note
+                      user_status, user_note, license_plate
                FROM events ORDER BY start_sec, id"""
         )
         cols = [c[0] for c in cur.description]
@@ -353,6 +366,17 @@ class Project:
             r["ped_track_ids"] = json.loads(r["ped_track_ids"] or "[]")
             r["veh_track_ids"] = json.loads(r["veh_track_ids"] or "[]")
         return rows
+
+    def update_event_plate(self, event_id: int, plate: str | None) -> None:
+        """儲存使用者手填的車牌;空字串視同清空。"""
+        normalised = (plate or "").strip() or None
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE events SET license_plate = ? WHERE id = ?",
+                (normalised, event_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"找不到 event id={event_id}")
 
     def update_event_status(
         self, event_id: int, status: str, note: str | None = None

@@ -82,3 +82,6 @@ annot10_*.jpg
 
 # Pipeline CLI artifacts
 zero_shot_events.json
+
+# UI preview renders(smoke 截圖,不入庫)
+preview_*.png

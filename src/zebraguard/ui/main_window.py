@@ -11,12 +11,8 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QFileDialog,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
     QMainWindow,
     QMessageBox,
-    QPushButton,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -86,41 +82,8 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        # Top bar
-        top = QFrame()
-        top.setObjectName("TopBar")
-        top.setFixedHeight(58)
-        top_layout = QHBoxLayout(top)
-        top_layout.setContentsMargins(24, 8, 24, 8)
-        top_layout.setSpacing(16)
-
-        logo = QLabel("🦓")  # placeholder;正式版會改 QSvgWidget
-        logo.setStyleSheet("font-size: 22px;")
-
-        title_col = QVBoxLayout()
-        title_col.setSpacing(0)
-        title = QLabel("ZebraGuard")
-        title.setObjectName("AppTitle")
-        subtitle = QLabel("行車記錄器未禮讓檢舉輔助")
-        subtitle.setObjectName("AppSubtitle")
-        title_col.addWidget(title)
-        title_col.addWidget(subtitle)
-
-        self.project_label = QLabel("尚未開啟專案")
-        self.project_label.setObjectName("ProjectName")
-
-        top_layout.addWidget(logo)
-        top_layout.addLayout(title_col)
-        top_layout.addStretch(1)
-        top_layout.addWidget(self.project_label)
-
-        self.close_proj_btn = QPushButton("關閉專案")
-        self.close_proj_btn.setProperty("ghost", True)
-        self.close_proj_btn.setVisible(False)
-        self.close_proj_btn.clicked.connect(self.action_close_project)
-        top_layout.addWidget(self.close_proj_btn)
-
-        # Stacked views
+        # Stacked views(TopBar 已移除;專案名顯示於 window title,關閉專案於
+        # 選單或 Review 左下)
         self.stack = QStackedWidget()
         self.import_view = ImportView()
         self.processing_view = ProcessingView()
@@ -129,13 +92,11 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.processing_view)
         self.stack.addWidget(self.review_view)
 
-        # Signals
         self.import_view.project_created.connect(self._on_project_created)
         self.processing_view.completed.connect(self._on_analysis_done)
         self.processing_view.cancelled.connect(self._on_analysis_cancelled)
         self.review_view.request_close_project.connect(self.action_close_project)
 
-        root_layout.addWidget(top)
         root_layout.addWidget(self.stack, stretch=1)
         self.setCentralWidget(root)
 
@@ -173,8 +134,7 @@ class MainWindow(QMainWindow):
             self.processing_view.cancel()
 
         self._project_path = None
-        self.project_label.setText("尚未開啟專案")
-        self.close_proj_btn.setVisible(False)
+        self._set_window_title(None)
         self.stack.setCurrentWidget(self.import_view)
         self.import_view.reset()
 
@@ -189,16 +149,14 @@ class MainWindow(QMainWindow):
             proj.close()
         except Exception:  # noqa: BLE001
             backend = "?"
-        self.project_label.setText(f"{path.stem}  ·  {backend}")
-        self.close_proj_btn.setVisible(True)
+        self._set_window_title(f"{path.stem}  ·  {backend}")
         self.stack.setCurrentWidget(self.processing_view)
         self.processing_view.start(path)
 
     def _on_analysis_done(self, project_path: str) -> None:
         path = Path(project_path)
         self._project_path = path
-        self.project_label.setText(path.stem)
-        self.close_proj_btn.setVisible(True)
+        self._set_window_title(path.stem)
         self.review_view.load_project(path)
         self.stack.setCurrentWidget(self.review_view)
 
@@ -216,8 +174,7 @@ class MainWindow(QMainWindow):
             return
 
         self._project_path = proj_dir
-        self.project_label.setText(proj_dir.stem)
-        self.close_proj_btn.setVisible(True)
+        self._set_window_title(proj_dir.stem)
 
         if has_events or stage == "done":
             self.review_view.load_project(proj_dir)
@@ -243,6 +200,10 @@ class MainWindow(QMainWindow):
             "<p>從行車記錄器影片識別車輛未禮讓斑馬線行人,協助產生檢舉輔助包。</p>"
             "<p>本軟體僅供合法檢舉用途;詳見啟動時顯示之免責聲明。</p>",
         )
+
+    def _set_window_title(self, project_tag: str | None) -> None:
+        base = f"ZebraGuard v{__version__}"
+        self.setWindowTitle(f"{base}  —  {project_tag}" if project_tag else base)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         # 清掉 decoder thread 等
