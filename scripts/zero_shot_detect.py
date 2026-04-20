@@ -471,16 +471,18 @@ def run(
                     mask_cache.append(cached_mask)
                     cur_mask_idx = len(mask_cache) - 1
             else:
-                # yolo_seg backend:source 自行管理膨脹 + components;
-                # 不提供 undilated raw mask 與 dilated binary,因此 preview / annotation
-                # 暫不支援(cache_enabled 已在 main() 禁用)。
+                # yolo_seg backend:source 自行管理膨脹 + components
                 labels_arr = crosswalk_source.get_labels(frame, idx)
                 cached_labels = labels_arr
                 cached_area = int((labels_arr > 0).sum())
                 cached_n_components = int(labels_arr.max())
-                # 保留 cached_mask / cached_dilated 為 None 以明示未提供
-                cached_mask = None
-                cached_dilated = None
+                # 由 labels 還原一張 binary mask;注意這個 mask 已是 post-dilate,
+                # 下游若要再 dilate 需傳 dilate_px=0。
+                cached_mask = (labels_arr > 0).astype(np.uint8) * 255
+                cached_dilated = cached_mask
+                if cache_enabled:
+                    mask_cache.append(cached_mask)
+                    cur_mask_idx = len(mask_cache) - 1
             last_seg_frame = idx
 
         # YOLO detection + ByteTrack (persistent IDs across stride calls)
@@ -778,9 +780,11 @@ def run(
 
     # ------- Second pass: write fully-annotated video -------
     if cache_enabled and annotated_out is not None:
+        # yolo_seg 儲存在 mask_cache 裡的已經是 post-dilate,不可再 dilate。
+        annot_dilate_px = 0 if crosswalk_backend == "yolo_seg" else dilate_px
         _write_annotated(
             video_path, annotated_out, frame_records, mask_cache,
-            events, fps, W, H, max_frame, dilate_px,
+            events, fps, W, H, max_frame, annot_dilate_px,
             progress_cb=progress_cb, cancel_event=cancel_event,
         )
         log(f"[done] annotated: {annotated_out}")
@@ -1071,12 +1075,11 @@ def main() -> int:
     p.add_argument("--yolo-seg-imgsz", type=int, default=640)
     args = p.parse_args()
 
-    if args.crosswalk_backend == "yolo_seg":
-        if args.annotated_out is not None or args.preview is not None:
-            print("[warn] --annotated-out / --preview 目前僅支援 mask2former backend,"
-                  "yolo_seg 下會被忽略。", flush=True)
-            args.annotated_out = None
-            args.preview = None
+    if args.crosswalk_backend == "yolo_seg" and args.preview is not None:
+        # --preview 路徑裡有 bug 會炸(ped_hits / moving_vehicles 未定義;mask2former
+        # 也一樣),短期跳過
+        print("[warn] --preview 暫時在 yolo_seg 下忽略(已知 bug,日後修)", flush=True)
+        args.preview = None
 
     yolo_seg_classes: list[str] | None = None
     if args.yolo_seg_classes.strip():

@@ -26,6 +26,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from zebraguard.utils.paths import resources_dir
+
+# 預設的 Aleton/Zebra_crossing 權重路徑(6.5 MB YOLOv8n-seg,MIT)
+# 使用者可透過檔案對話框改,或自行 fine-tune 後替換此檔
+DEFAULT_YOLO_SEG_WEIGHTS = "zebra_yolov8n_seg.pt"
+
 
 @dataclass
 class NewProjectOptions:
@@ -118,7 +124,14 @@ class NewProjectDialog(QDialog):
 
         # 預設選擇
         self.radio_dashcam.setChecked(True)
-        self.radio_mask2former.setChecked(True)
+        # 若偵測到預設 YOLO-seg 權重則直接填入 + 預選 YOLO-seg
+        # (多數使用者從 zip release 拿到的情境)
+        default_pt = resources_dir() / "models" / DEFAULT_YOLO_SEG_WEIGHTS
+        if default_pt.is_file():
+            self.weights_edit.setText(str(default_pt))
+            self.radio_yolo_seg.setChecked(True)
+        else:
+            self.radio_mask2former.setChecked(True)
         self._apply_backend_ui()
 
     def _mode_card(self) -> QWidget:
@@ -167,9 +180,10 @@ class NewProjectDialog(QDialog):
         )
         self.radio_yolo_seg, w2 = _radio_row(
             "YOLO-seg  —  CPU 可跑,品質依權重而定",
-            "需要您提供一組訓練好的 YOLO-seg 斑馬線 .pt 權重"
-            "(例如 Roboflow 上的公開資料集訓練產物或自行 fine-tune)。"
-            "模型小、CPU 也跑得動,但精度取決於權重品質。",
+            "需要您提供一組訓練好的 YOLO-seg 斑馬線 .pt 權重。"
+            "預設會偵測 resources/models/zebra_yolov8n_seg.pt "
+            "(可從 HuggingFace Aleton/Zebra_crossing 下載,6.5 MB, MIT)。"
+            "模型小、CPU 也跑得動;品質接近 Mask2Former 但夜間偶爾較糟。",
         )
 
         self.backend_group = QButtonGroup(self)

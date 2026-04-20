@@ -70,3 +70,15 @@ taiwan_events_annotated*.mp4
 
 # Demo project directory
 demo.zgproj/
+
+# 實驗產物(YOLO-seg 10min 驗證)
+yolo_seg_*.mp4
+yolo_seg_*.json
+yolo_seg_*.log
+yolo_seg_smoke/
+yolo_seg_event1/
+annot*.jpg
+annot10_*.jpg
+
+# Pipeline CLI artifacts
+zero_shot_events.json
