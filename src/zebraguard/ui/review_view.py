@@ -40,6 +40,8 @@ from zebraguard.core.project import Project
 from zebraguard.ui.video_player import PlayerView
 
 LOOP_PADDING_SEC = 3.0  # ±3 秒 loop 範圍
+MANUAL_EVENT_DEFAULT_SEC = 2.0  # 手動新增事件的預設長度
+MANUAL_NOTE_MARKER = "manual"  # user_note 設成這個 → UI 視為使用者手動建立
 
 
 class EventTimeline(QWidget):
@@ -79,6 +81,10 @@ class EventTimeline(QWidget):
         ratio = max(0.0, min(1.0, (x - 10) / w))
         self.clicked_at.emit(ratio * self._duration)
 
+    # 最小 marker 寬度:確保在 600s 時間軸上也能看得見 0.1s 的事件。
+    # 比原本的 3px 大,避免窄 marker 被圓角吃掉。
+    _MIN_MARKER_PX = 8
+
     def paintEvent(self, _event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -101,23 +107,45 @@ class EventTimeline(QWidget):
             return
 
         # event markers
+        selected_rect: tuple[int, int, int, int] | None = None
         for ev in self._events:
             start_r = max(0.0, ev["start_sec"] / self._duration)
             end_r = min(1.0, ev["end_sec"] / self._duration)
             x1 = 10 + int(start_r * usable_w)
             x2 = 10 + int(end_r * usable_w)
-            width = max(3, x2 - x1)
+            natural_w = x2 - x1
+            width = max(self._MIN_MARKER_PX, natural_w)
+            # 把加寬後的 marker 置中於原本位置,短事件不會因最小寬度被擠到右邊
+            draw_x = x1 - max(0, (width - natural_w) // 2)
+            draw_x = max(10, min(10 + usable_w - width, draw_x))
+
             status = ev.get("user_status", "pending")
+            manual = ev.get("_manual", False)
             if status == "accepted":
                 color = QColor("#10b981")
             elif status == "rejected":
                 color = QColor("#ef4444")
-            elif ev["id"] == self._selected_id:
-                color = QColor("#f5a524")
             else:
-                color = QColor("#6b7280")
+                color = QColor("#9aa1ad") if manual else QColor("#6b7280")
+
+            # 圓角隨寬度 — 窄 marker 用小圓角,不然整個被吃掉
+            radius = min(4, max(1, width // 4))
             p.setBrush(color)
-            p.drawRoundedRect(x1, y_bar - 2, width, bar_h + 4, 3, 3)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(draw_x, y_bar - 3, width, bar_h + 6, radius, radius)
+
+            if ev["id"] == self._selected_id:
+                selected_rect = (draw_x, y_bar - 3, width, bar_h + 6)
+
+        # 選取框最後畫(避免被別的 marker 蓋掉)
+        if selected_rect is not None:
+            x, y, rw, rh = selected_rect
+            pen = p.pen()
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QColor("#f5a524"))
+            radius = min(4, max(1, rw // 4))
+            p.drawRoundedRect(x - 1, y - 1, rw + 2, rh + 2, radius + 1, radius + 1)
+            p.setPen(pen)
 
         # playhead
         ratio = max(0.0, min(1.0, self._current / self._duration))
@@ -155,10 +183,16 @@ class EventListItem(QListWidgetItem):
         idx = event.get("_display_index", 0)
         dur = event["end_sec"] - event["start_sec"]
         mark = {"accepted": "✓", "rejected": "✗", "pending": "•"}[event.get("user_status", "pending")]
+        manual_tag = " ✚ 手動" if event.get("_manual") else ""
+        tracks_line = (
+            "手動新增事件(無追蹤)"
+            if event.get("_manual")
+            else (f"車 {len(event.get('veh_track_ids', []))}  "
+                  f"人 {len(event.get('ped_track_ids', []))}")
+        )
         text = (
-            f"{mark}  #{idx:03d}    {_fmt_time(event['start_sec'])}\n"
-            f"     持續 {dur:.1f}s    "
-            f"車 {len(event.get('veh_track_ids', []))}  人 {len(event.get('ped_track_ids', []))}"
+            f"{mark}  #{idx:03d}{manual_tag}    {_fmt_time(event['start_sec'])}\n"
+            f"     持續 {dur:.1f}s    {tracks_line}"
         )
         self.setText(text)
 
@@ -197,6 +231,12 @@ class ReviewView(QWidget):
         header.addSpacing(16)
         header.addWidget(self.summary)
         header.addStretch(1)
+        self.add_btn = QPushButton("✚  新增事件 (N)")
+        self.add_btn.setProperty("ghost", True)
+        self.add_btn.setMinimumWidth(140)
+        self.add_btn.clicked.connect(self._on_add_event)
+        header.addWidget(self.add_btn)
+
         self.export_btn = QPushButton("匯出採用片段…")
         self.export_btn.setProperty("accent", True)
         self.export_btn.setMinimumWidth(150)
@@ -224,8 +264,11 @@ class ReviewView(QWidget):
         self.event_list.currentItemChanged.connect(self._on_list_item_changed)
         ll.addWidget(list_title)
         ll.addWidget(self.event_list, stretch=1)
-        hint = QLabel("A 採用   R 拒絕   J/K 上下一則")
+        hint = QLabel(
+            "A 採用  R 拒絕  J/K 上下  N 新增  Del 刪除  Space 播放"
+        )
         hint.setObjectName("Hint")
+        hint.setWordWrap(True)
         ll.addWidget(hint)
         splitter.addWidget(left)
 
@@ -311,9 +354,13 @@ class ReviewView(QWidget):
         trim.addWidget(self.trim_apply)
         trim.addStretch(1)
 
-        # accept / reject
+        # accept / reject / delete
         actions = QHBoxLayout()
         actions.setSpacing(10)
+        self.delete_btn = QPushButton("🗑  刪除 (Del)")
+        self.delete_btn.setProperty("ghost", True)
+        self.delete_btn.setMinimumWidth(120)
+        self.delete_btn.clicked.connect(self._on_delete_event)
         self.reject_btn = QPushButton("✗  拒絕 (R)")
         self.reject_btn.setProperty("danger", True)
         self.reject_btn.setMinimumWidth(140)
@@ -323,6 +370,7 @@ class ReviewView(QWidget):
         self.accept_btn.setMinimumWidth(140)
         self.accept_btn.clicked.connect(lambda: self._set_status("accepted"))
 
+        actions.addWidget(self.delete_btn)
         actions.addStretch(1)
         actions.addWidget(self.reject_btn)
         actions.addWidget(self.accept_btn)
@@ -339,6 +387,8 @@ class ReviewView(QWidget):
             ("R", lambda: self._set_status("rejected")),
             ("J", lambda: self._move_selection(-1)),
             ("K", lambda: self._move_selection(+1)),
+            ("N", self._on_add_event),
+            ("Delete", self._on_delete_event),
             ("Space", self.player.toggle),
         ]:
             sc = QShortcut(QKeySequence(key), self)
@@ -368,6 +418,7 @@ class ReviewView(QWidget):
         self._events = []
         for i, e in enumerate(events):
             e["_display_index"] = i + 1
+            e["_manual"] = (e.get("user_note") == MANUAL_NOTE_MARKER)
             self._events.append(e)
 
         self.player.open(video_path)
@@ -412,7 +463,8 @@ class ReviewView(QWidget):
 
     def _show_event(self, ev: dict[str, Any]) -> None:
         idx = ev["_display_index"]
-        self.detail_title.setText(f"事件 #{idx:03d}")
+        manual_tag = "  ✚ 手動新增" if ev.get("_manual") else ""
+        self.detail_title.setText(f"事件 #{idx:03d}{manual_tag}")
         status = ev.get("user_status", "pending")
         obj_name = {
             "accepted": "StatusAccepted",
@@ -429,7 +481,9 @@ class ReviewView(QWidget):
         self.detail_time.setText(f"{_fmt_time(ev['start_sec'])} – {_fmt_time(ev['end_sec'])}")
         self.detail_dur.setText(f"{dur:.2f} 秒")
         self.detail_tracks.setText(
-            f"行人 {len(ev.get('ped_track_ids', []))} · 車輛 {len(ev.get('veh_track_ids', []))}"
+            "無(手動建立)"
+            if ev.get("_manual")
+            else f"行人 {len(ev.get('ped_track_ids', []))} · 車輛 {len(ev.get('veh_track_ids', []))}"
         )
 
         self.trim_start.blockSignals(True)
@@ -516,6 +570,92 @@ class ReviewView(QWidget):
             f"共 {total} 筆  ·  採用 {accepted}  ·  拒絕 {rejected}  ·  未審 {pending}"
         )
         self.export_btn.setEnabled(accepted > 0)
+
+    def _on_add_event(self) -> None:
+        if self._project_path is None:
+            return
+        fps = self.player.fps() or 30.0
+        start = max(0.0, self.player.current_time())
+        end = min(
+            self._video_duration or (start + MANUAL_EVENT_DEFAULT_SEC),
+            start + MANUAL_EVENT_DEFAULT_SEC,
+        )
+        if end <= start:
+            QMessageBox.warning(self, "時間無效", "無法在影片結尾處新增事件。")
+            return
+
+        project = Project.load(self._project_path)
+        try:
+            new_id = project.insert_event(
+                start_sec=start,
+                end_sec=end,
+                fps=fps,
+                user_status="accepted",  # 手動加代表使用者認定 → 先當已採用
+                user_note=MANUAL_NOTE_MARKER,
+            )
+        finally:
+            project.close()
+
+        self._reload_events_preserving_selection(new_id)
+
+    def _on_delete_event(self) -> None:
+        if self._current_id is None or self._project_path is None:
+            return
+        ev = self._find_event(self._current_id)
+        if ev is None:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "刪除事件?",
+            f"確定要刪除事件 #{ev['_display_index']:03d}(t={_fmt_time(ev['start_sec'])})嗎?\n"
+            "此操作無法復原。",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        project = Project.load(self._project_path)
+        try:
+            project.delete_event(self._current_id)
+        finally:
+            project.close()
+
+        # 選下一筆(若刪的是最後一筆則選前一筆)
+        cur_row = self.event_list.currentRow()
+        self._reload_events_preserving_selection(None)
+        if self.event_list.count() > 0:
+            new_row = min(cur_row, self.event_list.count() - 1)
+            self.event_list.setCurrentRow(new_row)
+        else:
+            self._current_id = None
+            self.detail_title.setText("已無事件")
+            self.detail_status.setText("")
+            self.player.pause()
+
+    def _reload_events_preserving_selection(self, select_id: int | None) -> None:
+        """刪除 / 新增後:從 DB 重新載入事件清單,然後依 select_id 還原選取。"""
+        if self._project_path is None:
+            return
+        project = Project.load(self._project_path)
+        try:
+            raw = project.load_events()
+        finally:
+            project.close()
+
+        self._events = []
+        for i, e in enumerate(raw):
+            e["_display_index"] = i + 1
+            e["_manual"] = (e.get("user_note") == MANUAL_NOTE_MARKER)
+            self._events.append(e)
+
+        self._rebuild_list()
+        self.timeline.set_events(self._events)
+        self._update_summary()
+
+        if select_id is not None:
+            for i, ev in enumerate(self._events):
+                if ev["id"] == select_id:
+                    self.event_list.setCurrentRow(i)
+                    break
 
     def _on_export_clicked(self) -> None:
         if self._project_path is None:

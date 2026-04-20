@@ -301,6 +301,11 @@ class PlayerView(QWidget):
     def fps(self) -> float:
         return self._fps
 
+    def current_time(self) -> float:
+        """目前 slider 位置對應的時間(秒)。"""
+        frame = self.slider.value()
+        return frame / self._fps if self._fps > 0 else 0.0
+
     def shutdown(self) -> None:
         """析構時呼叫:停掉 decoder thread。"""
         self._thread.request_stop()

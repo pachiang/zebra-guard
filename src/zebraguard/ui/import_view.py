@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from zebraguard.core.project import Project
+from zebraguard.ui.new_project_dialog import NewProjectDialog
 
 SUPPORTED_EXT = {".mp4", ".mov", ".mkv", ".avi"}
 
@@ -196,7 +197,15 @@ class ImportView(QWidget):
             QMessageBox.warning(self, "檔案不存在", f"找不到:{video}")
             return
 
-        # 決定專案存放位置
+        # Step 1:選分析模式 + backend + weights
+        wizard = NewProjectDialog(video, self)
+        if wizard.exec() != NewProjectDialog.DialogCode.Accepted:
+            return
+        opts = wizard.result_options()
+        if opts is None:
+            return
+
+        # Step 2:決定專案存放位置
         default_name = f"{video.stem}_{datetime.now():%Y%m%d_%H%M}.zgproj"
         default_dir = video.parent / default_name
         chosen, _ = QFileDialog.getSaveFileName(
@@ -219,7 +228,13 @@ class ImportView(QWidget):
             return
 
         try:
-            project = Project.create(proj_path, video)
+            project = Project.create(
+                proj_path,
+                video,
+                mode=opts.mode,
+                crosswalk_backend=opts.crosswalk_backend,
+                yolo_seg_weights=opts.yolo_seg_weights,
+            )
             project.close()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "建立專案失敗", str(exc))

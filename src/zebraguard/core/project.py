@@ -92,6 +92,15 @@ class ProjectMeta:
     version: int = PROJECT_FILE_VERSION
     created_at: str = ""
     updated_at: str = ""
+    # 頂層模式:dashcam(行車記錄器)/ static(靜態攝影機,手繪 ROI)
+    # 使用者建專案時二選一;之後不建議改,改會讓之前的結果變得不可比。
+    mode: str = "dashcam"
+    # Dashcam mode 底下的斑馬線 backend;只對 mode=dashcam 有意義。
+    # 值必須與 `scripts/zero_shot_detect.py` 的 --crosswalk-backend 對齊。
+    crosswalk_backend: str = "mask2former"
+    # YOLO-seg 權重路徑(僅當 crosswalk_backend=yolo_seg 時使用;可為空 →
+    # UI 會在開始分析前要求使用者選一個)
+    yolo_seg_weights: str = ""
     video_path: str = ""
     video_sha256_partial: str = ""  # 前 8 MB 的 SHA256;為身分識別而非完整校驗
     video_fps: float = 0.0
@@ -130,13 +139,25 @@ class Project:
     # ---- 生命週期 -----------------------------------------------------------
 
     @classmethod
-    def create(cls, path: str | Path, video_path: str | Path) -> Self:
+    def create(
+        cls,
+        path: str | Path,
+        video_path: str | Path,
+        *,
+        mode: str = "dashcam",
+        crosswalk_backend: str = "mask2former",
+        yolo_seg_weights: str = "",
+    ) -> Self:
         path = Path(path)
         if path.exists():
             raise FileExistsError(f"Project 已存在: {path}")
         video_path = Path(video_path).resolve()
         if not video_path.exists():
             raise FileNotFoundError(f"影片不存在: {video_path}")
+        if mode not in ("dashcam", "static"):
+            raise ValueError(f"無效 mode: {mode}")
+        if crosswalk_backend not in ("mask2former", "yolo_seg"):
+            raise ValueError(f"無效 crosswalk_backend: {crosswalk_backend}")
 
         path.mkdir(parents=True)
         (path / "thumbnails").mkdir()
@@ -145,6 +166,9 @@ class Project:
         meta = ProjectMeta(
             created_at=_now_iso(),
             updated_at=_now_iso(),
+            mode=mode,
+            crosswalk_backend=crosswalk_backend,
+            yolo_seg_weights=yolo_seg_weights,
             video_path=str(video_path),
             video_sha256_partial=_compute_partial_hash(video_path),
         )
@@ -340,6 +364,58 @@ class Project:
                 "UPDATE events SET user_status = ?, user_note = ? WHERE id = ?",
                 (status, note, event_id),
             )
+            if cur.rowcount == 0:
+                raise KeyError(f"找不到 event id={event_id}")
+
+    def insert_event(
+        self,
+        *,
+        start_sec: float,
+        end_sec: float,
+        fps: float,
+        user_status: str = "pending",
+        user_note: str | None = None,
+        ped_track_ids: list[int] | None = None,
+        veh_track_ids: list[int] | None = None,
+        min_distance_px: float = 0.0,
+        peak_speed_px: float = 0.0,
+    ) -> int:
+        """新增一筆事件(多半為使用者手動建立)。回傳 autoincrement 後的 id。
+
+        手動建立的事件通常 track_ids 為空、距離/速度為 0;pipeline 不會也沒必要
+        區分 `_manual` 欄位,因為使用者要的是「我加的」vs「AI 加的」,而 AI 加的
+        事件一定帶 track_ids。`user_note` 若傳 "manual" 之類的字串,UI 還可以更
+        明確地標示。
+        """
+        if end_sec <= start_sec:
+            raise ValueError("end_sec 必須大於 start_sec")
+        if user_status not in ("pending", "accepted", "rejected"):
+            raise ValueError(f"無效 status: {user_status}")
+        with self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO events
+                   (start_frame, end_frame, start_sec, end_sec,
+                    min_distance_px, peak_speed_px, ped_track_ids, veh_track_ids,
+                    user_status, user_note)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    int(round(start_sec * fps)),
+                    int(round(end_sec * fps)),
+                    float(start_sec),
+                    float(end_sec),
+                    float(min_distance_px),
+                    float(peak_speed_px),
+                    json.dumps(list(ped_track_ids or [])),
+                    json.dumps(list(veh_track_ids or [])),
+                    user_status,
+                    user_note,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def delete_event(self, event_id: int) -> None:
+        with self._conn:
+            cur = self._conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
             if cur.rowcount == 0:
                 raise KeyError(f"找不到 event id={event_id}")
 

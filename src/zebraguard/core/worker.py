@@ -95,8 +95,6 @@ class PipelineWorker(QObject):
             self.finished.emit()
 
     def _run_inner(self) -> None:
-        # 先載 zero_shot module,以便抓到 Cancelled 型別
-        self.log_line.emit("載入 Mask2Former 模型(首次約需 30 秒)…")
         zs = _load_zero_shot_module()
         cancelled_exc = zs.Cancelled
 
@@ -106,18 +104,43 @@ class PipelineWorker(QObject):
             if not video_path.exists():
                 raise FileNotFoundError(f"影片不存在: {video_path}")
 
+            mode = project.meta.mode or "dashcam"
+            backend = project.meta.crosswalk_backend or "mask2former"
+            if mode == "static":
+                raise NotImplementedError(
+                    "Static mode 尚未實作(見 docs/pipelines.md)"
+                )
+
             params = _load_v7_params()
             if self._max_seconds is not None:
                 params["max_seconds"] = float(self._max_seconds)
 
-            params_snapshot = {"preset": "v7_baseline", **params}
+            if backend == "yolo_seg":
+                weights = project.meta.yolo_seg_weights
+                if not weights:
+                    raise RuntimeError(
+                        "專案 crosswalk_backend=yolo_seg 但未指定 yolo_seg_weights;"
+                        "請在新專案 wizard 指定 .pt 路徑。"
+                    )
+                self.log_line.emit(
+                    f"載入 YOLO-seg 斑馬線權重:{weights}"
+                )
+            else:
+                self.log_line.emit("載入 Mask2Former 模型(首次約需 30 秒)…")
+
+            params_snapshot = {
+                "preset": "v7_baseline",
+                "mode": mode,
+                "crosswalk_backend": backend,
+                **params,
+            }
             project.save_config(params_snapshot)
             project.update_progress("analyzing", processed_frames=0)
 
             import torch
 
             device_str = "cuda" if torch.cuda.is_available() else "cpu"
-            self.log_line.emit(f"運算裝置:{device_str}")
+            self.log_line.emit(f"運算裝置:{device_str} / backend={backend}")
 
             def cb(stage: str, current: int, total: int, hits: int) -> None:
                 self.progress.emit(stage, int(current), int(total), int(hits))
@@ -151,6 +174,9 @@ class PipelineWorker(QObject):
                     rider_foot_margin_px=params["rider_foot_margin_px"],
                     person_conf=params["person_conf"],
                     mask_imgsz=params["mask_imgsz"],
+                    crosswalk_backend=backend,
+                    yolo_seg_weights=project.meta.yolo_seg_weights,
+                    yolo_seg_classes=None,  # 未來從 meta 讀
                     progress_cb=cb,
                     cancel_event=self._cancel,
                 )
