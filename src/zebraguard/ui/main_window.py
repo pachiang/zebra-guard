@@ -183,7 +183,13 @@ class MainWindow(QMainWindow):
     def _on_project_created(self, project_path: str) -> None:
         path = Path(project_path)
         self._project_path = path
-        self.project_label.setText(path.stem)
+        try:
+            proj = Project.load(path)
+            backend = proj.meta.crosswalk_backend
+            proj.close()
+        except Exception:  # noqa: BLE001
+            backend = "?"
+        self.project_label.setText(f"{path.stem}  ·  {backend}")
         self.close_proj_btn.setVisible(True)
         self.stack.setCurrentWidget(self.processing_view)
         self.processing_view.start(path)

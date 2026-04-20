@@ -92,6 +92,15 @@ class ProjectMeta:
     version: int = PROJECT_FILE_VERSION
     created_at: str = ""
     updated_at: str = ""
+    # 頂層模式:dashcam(行車記錄器)/ static(靜態攝影機,手繪 ROI)
+    # 使用者建專案時二選一;之後不建議改,改會讓之前的結果變得不可比。
+    mode: str = "dashcam"
+    # Dashcam mode 底下的斑馬線 backend;只對 mode=dashcam 有意義。
+    # 值必須與 `scripts/zero_shot_detect.py` 的 --crosswalk-backend 對齊。
+    crosswalk_backend: str = "mask2former"
+    # YOLO-seg 權重路徑(僅當 crosswalk_backend=yolo_seg 時使用;可為空 →
+    # UI 會在開始分析前要求使用者選一個)
+    yolo_seg_weights: str = ""
     video_path: str = ""
     video_sha256_partial: str = ""  # 前 8 MB 的 SHA256;為身分識別而非完整校驗
     video_fps: float = 0.0
@@ -130,13 +139,25 @@ class Project:
     # ---- 生命週期 -----------------------------------------------------------
 
     @classmethod
-    def create(cls, path: str | Path, video_path: str | Path) -> Self:
+    def create(
+        cls,
+        path: str | Path,
+        video_path: str | Path,
+        *,
+        mode: str = "dashcam",
+        crosswalk_backend: str = "mask2former",
+        yolo_seg_weights: str = "",
+    ) -> Self:
         path = Path(path)
         if path.exists():
             raise FileExistsError(f"Project 已存在: {path}")
         video_path = Path(video_path).resolve()
         if not video_path.exists():
             raise FileNotFoundError(f"影片不存在: {video_path}")
+        if mode not in ("dashcam", "static"):
+            raise ValueError(f"無效 mode: {mode}")
+        if crosswalk_backend not in ("mask2former", "yolo_seg"):
+            raise ValueError(f"無效 crosswalk_backend: {crosswalk_backend}")
 
         path.mkdir(parents=True)
         (path / "thumbnails").mkdir()
@@ -145,6 +166,9 @@ class Project:
         meta = ProjectMeta(
             created_at=_now_iso(),
             updated_at=_now_iso(),
+            mode=mode,
+            crosswalk_backend=crosswalk_backend,
+            yolo_seg_weights=yolo_seg_weights,
             video_path=str(video_path),
             video_sha256_partial=_compute_partial_hash(video_path),
         )

@@ -307,12 +307,56 @@ def run(
     rider_foot_margin_px: int,
     person_conf: float,
     mask_imgsz: int,
+    crosswalk_backend: str = "mask2former",
+    yolo_seg_weights: str = "",
+    yolo_seg_classes: list[str] | None = None,
+    yolo_seg_conf: float = 0.25,
+    yolo_seg_imgsz: int = 640,
     progress_cb: ProgressCallback | None = None,
     cancel_event: threading.Event | None = None,
 ) -> dict:
     device = torch.device(device_str)
 
-    processor, mask_model, zebra_ids = load_mask2former(model_name, device, progress_cb)
+    if crosswalk_backend not in ("mask2former", "yolo_seg"):
+        raise ValueError(
+            f"未知的 crosswalk_backend: {crosswalk_backend};"
+            f"支援 mask2former / yolo_seg"
+        )
+    log(f"[backend] crosswalk source = {crosswalk_backend}")
+
+    # === Crosswalk backend 載入 ===
+    # 注意 mask2former 路徑維持與舊版 byte-level 等價(regression 基準)。
+    # yolo_seg 路徑使用 CrosswalkSource 介面。
+    processor = mask_model = zebra_ids = None
+    crosswalk_source = None  # yolo_seg 用
+    if crosswalk_backend == "mask2former":
+        processor, mask_model, zebra_ids = load_mask2former(model_name, device, progress_cb)
+    else:
+        from zebraguard.ml.crosswalk.yolo_seg import YoloSegConfig, YoloSegSource
+
+        if not yolo_seg_weights:
+            raise ValueError(
+                "crosswalk_backend=yolo_seg 需要 --yolo-seg-weights 指定 .pt 權重"
+            )
+        log(f"[models] loading YOLO-seg crosswalk weights: {yolo_seg_weights}")
+        if progress_cb is not None:
+            progress_cb("loading_mask", 0, 1, 0)
+        crosswalk_source = YoloSegSource(
+            YoloSegConfig(
+                weights=yolo_seg_weights,
+                class_names=yolo_seg_classes,
+                conf=yolo_seg_conf,
+                imgsz=yolo_seg_imgsz,
+                dilate_px=dilate_px,
+                min_mask_area_frac=min_mask_area_frac,
+                infer_every=max(1, mask_every),  # 沿用 mask_every 當推論節流
+                device=device_str if device.type != "cpu" else "cpu",
+            )
+        )
+        # 觸發模型載入(讓 progress 能準確反映)
+        crosswalk_source._ensure_loaded()
+        if progress_cb is not None:
+            progress_cb("loading_mask", 1, 1, 0)
 
     from ultralytics import YOLO
 
@@ -385,44 +429,58 @@ def run(
             idx += 1
             continue
 
-        # Refresh zebra-crossing mask periodically
-        if cached_mask is None or idx - last_seg_frame >= mask_every:
-            raw = segment_zebra(frame, processor, mask_model, zebra_ids, device,
-                                mask_imgsz=mask_imgsz)
-            area = int((raw > 0).sum())
-            if area < min_mask_area_px:
-                # Mask too small this cycle → clear. (v6 kept the previous mask
-                # but on moving dashcam this leaves ghost zebras at their old
-                # image positions as the camera drives forward.)
-                cached_mask = np.zeros_like(raw)
-                cached_dilated = np.zeros_like(raw)
-                cached_dist = np.full_like(raw, 10**6, dtype=np.float32)
-                cached_labels = np.zeros(raw.shape, dtype=np.int32)
-                cached_area = 0
-                cached_n_components = 0
+        # Refresh zebra-crossing mask periodically.
+        # 用 cached_labels 做 "first iteration" 判斷,而不是 cached_mask,
+        # 因為 yolo_seg backend 可能讓 cached_mask 保持 None。
+        if cached_labels is None or idx - last_seg_frame >= mask_every:
+            if crosswalk_backend == "mask2former":
+                raw = segment_zebra(frame, processor, mask_model, zebra_ids, device,
+                                    mask_imgsz=mask_imgsz)
+                area = int((raw > 0).sum())
+                if area < min_mask_area_px:
+                    # Mask too small this cycle → clear. (v6 kept the previous mask
+                    # but on moving dashcam this leaves ghost zebras at their old
+                    # image positions as the camera drives forward.)
+                    cached_mask = np.zeros_like(raw)
+                    cached_dilated = np.zeros_like(raw)
+                    cached_dist = np.full_like(raw, 10**6, dtype=np.float32)
+                    cached_labels = np.zeros(raw.shape, dtype=np.int32)
+                    cached_area = 0
+                    cached_n_components = 0
+                else:
+                    cached_mask = raw
+                    cached_dilated = dilate_mask(cached_mask, dilate_px)
+                    cached_dist = distance_to_mask(cached_dilated)
+                    # Connected components on the DILATED mask: nearby crosswalks
+                    # that merge after dilation share an id (treated as one zone);
+                    # crosswalks on different sides of an intersection stay separate.
+                    n_labels, labels = cv2.connectedComponents(cached_dilated)
+                    # Light per-component noise filter: drop specks < 200 px but
+                    # keep all meaningful zebra-crossing slices.
+                    min_comp = 200
+                    kept = np.zeros(n_labels, dtype=np.int32)
+                    next_id = 1
+                    for lab in range(1, n_labels):
+                        if int((labels == lab).sum()) >= min_comp:
+                            kept[lab] = next_id
+                            next_id += 1
+                    cached_labels = kept[labels]
+                    cached_area = area
+                    cached_n_components = next_id - 1
+                if cache_enabled:
+                    mask_cache.append(cached_mask)
+                    cur_mask_idx = len(mask_cache) - 1
             else:
-                cached_mask = raw
-                cached_dilated = dilate_mask(cached_mask, dilate_px)
-                cached_dist = distance_to_mask(cached_dilated)
-                # Connected components on the DILATED mask: nearby crosswalks
-                # that merge after dilation share an id (treated as one zone);
-                # crosswalks on different sides of an intersection stay separate.
-                n_labels, labels = cv2.connectedComponents(cached_dilated)
-                # Light per-component noise filter: drop specks < 200 px but
-                # keep all meaningful zebra-crossing slices.
-                min_comp = 200
-                kept = np.zeros(n_labels, dtype=np.int32)
-                next_id = 1
-                for lab in range(1, n_labels):
-                    if int((labels == lab).sum()) >= min_comp:
-                        kept[lab] = next_id
-                        next_id += 1
-                cached_labels = kept[labels]
-                cached_area = area
-                cached_n_components = next_id - 1
-            if cache_enabled:
-                mask_cache.append(cached_mask)
-                cur_mask_idx = len(mask_cache) - 1
+                # yolo_seg backend:source 自行管理膨脹 + components;
+                # 不提供 undilated raw mask 與 dilated binary,因此 preview / annotation
+                # 暫不支援(cache_enabled 已在 main() 禁用)。
+                labels_arr = crosswalk_source.get_labels(frame, idx)
+                cached_labels = labels_arr
+                cached_area = int((labels_arr > 0).sum())
+                cached_n_components = int(labels_arr.max())
+                # 保留 cached_mask / cached_dilated 為 None 以明示未提供
+                cached_mask = None
+                cached_dilated = None
             last_seg_frame = idx
 
         # YOLO detection + ByteTrack (persistent IDs across stride calls)
@@ -674,8 +732,13 @@ def run(
         "frame_hits": len(frame_hits),
         "events": [asdict(e) for e in events],
         "params": {
+            "crosswalk_backend": crosswalk_backend,
             "mask_model": model_name,
             "yolo_weights": yolo_weights,
+            "yolo_seg_weights": yolo_seg_weights,
+            "yolo_seg_classes": yolo_seg_classes,
+            "yolo_seg_conf": yolo_seg_conf,
+            "yolo_seg_imgsz": yolo_seg_imgsz,
             "stride": stride,
             "mask_every": mask_every,
             "dilate_px": dilate_px,
@@ -992,7 +1055,38 @@ def main() -> int:
                    help="If > 0, resize frame so its short side is this many pixels "
                         "before Mask2Former inference (output mask is upscaled back). "
                         "Reduces GPU load / heat; 640 is a good value for 720p input.")
+    p.add_argument("--crosswalk-backend", choices=["mask2former", "yolo_seg"],
+                   default="mask2former",
+                   help="Which crosswalk segmentation backend to use. "
+                        "mask2former = GPU-heavy but accurate; yolo_seg = CPU-friendly "
+                        "but depends on the quality of the supplied .pt weights.")
+    p.add_argument("--yolo-seg-weights", type=str, default="",
+                   help="Path to YOLO-seg .pt weights for crosswalk segmentation "
+                        "(required when --crosswalk-backend=yolo_seg).")
+    p.add_argument("--yolo-seg-classes", type=str, default="",
+                   help="Comma-separated list of class names from the YOLO-seg model "
+                        "to treat as crosswalk. Empty = accept all classes "
+                        "(for single-class models).")
+    p.add_argument("--yolo-seg-conf", type=float, default=0.25)
+    p.add_argument("--yolo-seg-imgsz", type=int, default=640)
     args = p.parse_args()
+
+    if args.crosswalk_backend == "yolo_seg":
+        if args.annotated_out is not None or args.preview is not None:
+            print("[warn] --annotated-out / --preview 目前僅支援 mask2former backend,"
+                  "yolo_seg 下會被忽略。", flush=True)
+            args.annotated_out = None
+            args.preview = None
+
+    yolo_seg_classes: list[str] | None = None
+    if args.yolo_seg_classes.strip():
+        yolo_seg_classes = [s.strip() for s in args.yolo_seg_classes.split(",") if s.strip()]
+
+    # 讓 zebraguard package 能被 import(當 repo 未安裝時)
+    import sys as _sys
+    _src = Path(__file__).resolve().parent.parent / "src"
+    if str(_src) not in _sys.path:
+        _sys.path.insert(0, str(_src))
 
     run(
         args.video,
@@ -1022,6 +1116,11 @@ def main() -> int:
         rider_foot_margin_px=args.rider_foot_margin_px,
         person_conf=args.person_conf,
         mask_imgsz=args.mask_imgsz,
+        crosswalk_backend=args.crosswalk_backend,
+        yolo_seg_weights=args.yolo_seg_weights,
+        yolo_seg_classes=yolo_seg_classes,
+        yolo_seg_conf=args.yolo_seg_conf,
+        yolo_seg_imgsz=args.yolo_seg_imgsz,
     )
     return 0
 
