@@ -443,6 +443,11 @@ class Project:
             if cur.rowcount == 0:
                 raise KeyError(f"找不到 event id={event_id}")
 
+    def clear_events(self) -> None:
+        """清掉所有事件(重跑前使用);已產的 thumbnail 檔不動。"""
+        with self._conn:
+            self._conn.execute("DELETE FROM events")
+
     def update_event_range(
         self, event_id: int, start_sec: float, end_sec: float, fps: float
     ) -> None:

@@ -1,0 +1,35 @@
+{
+  "_comment": "YOLO-seg crosswalk backend 的基準參數;針對『抓到遠處小斑馬線』調整,比 v7 的 Mask2Former 友善。差異標註於 __diff__ 區塊。",
+  "__diff_vs_v7__": {
+    "mask_every": "5 → 2 (YOLO-seg 夠快;每 2 個處理幀就重跑,減少 dashcam 移動時的 mask 過時)",
+    "min_mask_area_frac": "0.005 → 0.001 (0.5% → 0.1%,不再把遠處面積小的斑馬線 mask 丟掉)",
+    "yolo_seg_conf": "0.25 → 0.20 (YOLO-seg 對小斑馬線信心較低時仍採納)",
+    "yolo_seg_min_component_px": "200 → 80 (膨脹後小 component 不砍掉)"
+  },
+
+  "mask_model": "facebook/mask2former-swin-large-mapillary-vistas-semantic",
+  "yolo_weights": "yolo11n.pt",
+  "stride": 3,
+  "mask_every": 2,
+  "dilate_px": 20,
+  "prox_px": 0,
+  "moving_px": 2.0,
+  "conf": 0.2,
+  "imgsz": 640,
+  "merge_gap_sec": 0.6,
+  "min_event_frames": 2,
+  "exclude_ego": true,
+  "ego_bottom_px": 4,
+  "ego_min_width_frac": 0.4,
+  "ego_min_height_frac": 0.25,
+  "max_seconds": 600.0,
+  "min_mask_area_frac": 0.001,
+  "rider_contain_thresh": 0.4,
+  "rider_foot_margin_px": 12,
+  "person_conf": 0.35,
+  "mask_imgsz": 640,
+
+  "yolo_seg_conf": 0.20,
+  "yolo_seg_imgsz": 640,
+  "yolo_seg_min_component_px": 80
+}

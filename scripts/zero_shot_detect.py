@@ -312,6 +312,7 @@ def run(
     yolo_seg_classes: list[str] | None = None,
     yolo_seg_conf: float = 0.25,
     yolo_seg_imgsz: int = 640,
+    yolo_seg_min_component_px: int = 200,
     progress_cb: ProgressCallback | None = None,
     cancel_event: threading.Event | None = None,
 ) -> dict:
@@ -349,7 +350,8 @@ def run(
                 imgsz=yolo_seg_imgsz,
                 dilate_px=dilate_px,
                 min_mask_area_frac=min_mask_area_frac,
-                infer_every=max(1, mask_every),  # 沿用 mask_every 當推論節流
+                min_component_px=yolo_seg_min_component_px,
+                infer_every=max(1, mask_every),
                 device=device_str if device.type != "cpu" else "cpu",
             )
         )
@@ -741,6 +743,7 @@ def run(
             "yolo_seg_classes": yolo_seg_classes,
             "yolo_seg_conf": yolo_seg_conf,
             "yolo_seg_imgsz": yolo_seg_imgsz,
+            "yolo_seg_min_component_px": yolo_seg_min_component_px,
             "stride": stride,
             "mask_every": mask_every,
             "dilate_px": dilate_px,
@@ -1073,6 +1076,9 @@ def main() -> int:
                         "(for single-class models).")
     p.add_argument("--yolo-seg-conf", type=float, default=0.25)
     p.add_argument("--yolo-seg-imgsz", type=int, default=640)
+    p.add_argument("--yolo-seg-min-component-px", type=int, default=200,
+                   help="膨脹 + connected-components 後,小於此像素數的 component 丟掉。"
+                        "yolo_seg_baseline preset 設 80 抓遠處小斑馬線;Mask2Former 路徑固定 200。")
     args = p.parse_args()
 
     if args.crosswalk_backend == "yolo_seg" and args.preview is not None:
@@ -1124,6 +1130,7 @@ def main() -> int:
         yolo_seg_classes=yolo_seg_classes,
         yolo_seg_conf=args.yolo_seg_conf,
         yolo_seg_imgsz=args.yolo_seg_imgsz,
+        yolo_seg_min_component_px=args.yolo_seg_min_component_px,
     )
     return 0
 

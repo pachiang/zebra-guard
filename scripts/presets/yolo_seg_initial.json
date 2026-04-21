@@ -1,0 +1,30 @@
+{
+  "_comment": "YOLO-seg backend 的原版設定 — 沿用 v7 Mask2Former 的閾值 + YOLO 預設的 0.25 信心。是最早(尚未針對抓遠處小斑馬線調整)的行為,**worker 預設載入此組**。",
+  "_history": "me=5 / ysc=0.25 / mma=0.005。改 me / ysc / mma 的動機見 yolo_seg_baseline.json 與 yolo_seg_tuned.json。",
+
+  "mask_model": "facebook/mask2former-swin-large-mapillary-vistas-semantic",
+  "yolo_weights": "yolo11n.pt",
+  "stride": 3,
+  "mask_every": 5,
+  "dilate_px": 20,
+  "prox_px": 0,
+  "moving_px": 2.0,
+  "conf": 0.2,
+  "imgsz": 640,
+  "merge_gap_sec": 0.6,
+  "min_event_frames": 2,
+  "exclude_ego": true,
+  "ego_bottom_px": 4,
+  "ego_min_width_frac": 0.4,
+  "ego_min_height_frac": 0.25,
+  "max_seconds": 600.0,
+  "min_mask_area_frac": 0.005,
+  "rider_contain_thresh": 0.4,
+  "rider_foot_margin_px": 12,
+  "person_conf": 0.35,
+  "mask_imgsz": 640,
+
+  "yolo_seg_conf": 0.25,
+  "yolo_seg_imgsz": 640,
+  "yolo_seg_min_component_px": 200
+}

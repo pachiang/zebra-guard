@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -51,6 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from zebraguard.core.project import Project
+from zebraguard.ui.advanced_settings_dialog import AdvancedSettingsDialog
 from zebraguard.ui.thumbnails import (
     THUMB_H,
     THUMB_W,
@@ -422,8 +424,55 @@ class EventRowWidget(QFrame):
 # ====================================================================
 
 
+_KEBAB_SVG = """\
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='{color}'>
+  <circle cx='12' cy='5'  r='1.8'/>
+  <circle cx='12' cy='12' r='1.8'/>
+  <circle cx='12' cy='19' r='1.8'/>
+</svg>"""
+
+
+class _KebabButton(QPushButton):
+    """三點 overflow menu 按鈕。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("", parent)
+        self.setFixedSize(34, 34)
+        self.setFlat(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setToolTip("更多選項")
+        self.setStyleSheet(
+            """
+            QPushButton {
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background: #242832; border-color: #2e333f; }
+            QPushButton:pressed { background: #1f2330; }
+            """
+        )
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        color = "#f5a524" if self.underMouse() else "#e8eaed"
+        svg = QByteArray(_KEBAB_SVG.format(color=color).encode("utf-8"))
+        renderer = QSvgRenderer(svg)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        size = 18
+        cx = self.width() // 2
+        cy = self.height() // 2
+        renderer.render(p, QRectF(cx - size / 2, cy - size / 2, size, size))
+        p.end()
+
+
 class ReviewView(QWidget):
     request_close_project = Signal()
+    # (pipeline_config dict) — 使用者在進階設定按「套用並重跑」,帶新參數
+    # 交給 MainWindow:清事件 + 切 ProcessingView + 重新 start
+    request_rerun = Signal(dict)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -506,9 +555,73 @@ class ReviewView(QWidget):
         self.export_btn.setMinimumWidth(140)
         self.export_btn.clicked.connect(self._on_export_clicked)
 
+        self.kebab_btn = _KebabButton()
+        self.kebab_btn.clicked.connect(self._show_overflow_menu)
+
         row.addWidget(self.add_btn)
         row.addWidget(self.export_btn)
+        row.addWidget(self.kebab_btn)
         return row
+
+    def _show_overflow_menu(self) -> None:
+        menu = QMenu(self)
+        act_settings = menu.addAction("進階設定…")
+        act_rerun = menu.addAction("重跑分析(使用目前參數)…")
+        menu.addSeparator()
+        act_reveal = menu.addAction("開啟專案資料夾")
+        act_settings.triggered.connect(self._open_advanced_settings)
+        act_rerun.triggered.connect(lambda: self._request_rerun_confirmed(None))
+        act_reveal.triggered.connect(self._reveal_project)
+        # 彈在按鈕左下
+        pos = self.kebab_btn.mapToGlobal(self.kebab_btn.rect().bottomLeft())
+        menu.exec(pos)
+
+    def _open_advanced_settings(self) -> None:
+        if self._project_path is None:
+            return
+        project = Project.load(self._project_path)
+        try:
+            config = dict(project.meta.pipeline_config or {})
+            backend = project.meta.crosswalk_backend or "mask2former"
+        finally:
+            project.close()
+
+        dlg = AdvancedSettingsDialog(config, backend, self)
+        if dlg.exec() != AdvancedSettingsDialog.DialogCode.Accepted:
+            return
+        new_params = dlg.result_params()
+        if new_params is None:
+            return
+        # __rerun__ 表示使用者想重跑;剝掉這個旗標再存
+        rerun = new_params.pop("__rerun__", False)
+        self._request_rerun_confirmed(new_params if rerun else None)
+
+    def _request_rerun_confirmed(
+        self, new_params: dict[str, Any] | None
+    ) -> None:
+        """確認框 → 若 OK 則 emit request_rerun(帶可選的新參數)。"""
+        if self._project_path is None:
+            return
+        total = len(self._events)
+        reviewed = sum(
+            1 for e in self._events
+            if e.get("user_status") in ("accepted", "rejected")
+        )
+        msg = (
+            f"重跑會清除目前 {total} 筆事件與 {reviewed} 筆審查狀態,無法復原。\n"
+            "縮圖會在新事件產生時重新抽取。\n\n確定要重跑嗎?"
+        )
+        if QMessageBox.question(self, "重跑分析?", msg) != QMessageBox.StandardButton.Yes:
+            return
+        self.request_rerun.emit(new_params or {})
+
+    def _reveal_project(self) -> None:
+        if self._project_path is None:
+            return
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._project_path)))
 
     def _right_side(self) -> QWidget:
         right = QWidget()

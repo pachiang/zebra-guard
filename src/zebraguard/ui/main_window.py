@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         self.processing_view.completed.connect(self._on_analysis_done)
         self.processing_view.cancelled.connect(self._on_analysis_cancelled)
         self.review_view.request_close_project.connect(self.action_close_project)
+        self.review_view.request_rerun.connect(self._on_rerun_requested)
 
         root_layout.addWidget(self.stack, stretch=1)
         self.setCentralWidget(root)
@@ -162,6 +163,29 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_cancelled(self) -> None:
         self.action_close_project()
+
+    def _on_rerun_requested(self, new_params: dict) -> None:
+        """Review 發的重跑請求。清舊事件、套用新 config、切 ProcessingView。"""
+        if self._project_path is None:
+            return
+        try:
+            project = Project.load(self._project_path)
+            try:
+                if new_params:
+                    # 保留 mode / crosswalk_backend 等中繼鍵
+                    existing = dict(project.meta.pipeline_config or {})
+                    existing.update(new_params)
+                    project.save_config(existing)
+                project.clear_events()
+                project.update_progress("rerun_requested")
+            finally:
+                project.close()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "重跑失敗", f"無法準備重跑:\n{exc}")
+            return
+
+        self.stack.setCurrentWidget(self.processing_view)
+        self.processing_view.start(self._project_path)
 
     def _load_existing_project(self, proj_dir: Path) -> None:
         try:

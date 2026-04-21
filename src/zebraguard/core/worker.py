@@ -38,11 +38,33 @@ def _load_zero_shot_module():
     return module
 
 
-def _load_v7_params() -> dict[str, Any]:
-    """讀 v7_baseline_params.json;UI 全流程固定這組參數。"""
-    path = presets_dir() / "v7_baseline_params.json"
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+_BACKEND_PRESET = {
+    "mask2former": "v7_baseline_params.json",
+    "yolo_seg":    "yolo_seg_initial.json",  # 最原版 = v7 閾值 + ysc 0.25
+}
+
+
+def _load_preset(backend: str) -> dict[str, Any]:
+    """依 crosswalk backend 讀對應的 preset。"""
+    fname = _BACKEND_PRESET.get(backend, "v7_baseline_params.json")
+    with open(presets_dir() / fname, encoding="utf-8") as f:
+        data = json.load(f)
+    # 去掉僅供人看的注釋欄位,免得後面 dict-sprinkle 進去時卡住
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+# project.meta.pipeline_config 存檔時夾帶的中繼鍵(不是 run() 接受的參數,
+# 過濾掉才能把 dict 直接攤平成 kwargs)
+_CONFIG_METADATA_KEYS = {"preset", "mode", "crosswalk_backend"}
+
+
+def _resolve_params(project: Project, backend: str) -> dict[str, Any]:
+    """優先用 project 自己存的 pipeline_config(使用者在進階設定動過),
+    否則 fallback 到 backend 對應的 preset。"""
+    saved = project.meta.pipeline_config or {}
+    if saved:
+        return {k: v for k, v in saved.items() if k not in _CONFIG_METADATA_KEYS}
+    return _load_preset(backend)
 
 
 class PipelineWorker(QObject):
@@ -111,7 +133,7 @@ class PipelineWorker(QObject):
                     "Static mode 尚未實作(見 docs/pipelines.md)"
                 )
 
-            params = _load_v7_params()
+            params = _resolve_params(project, backend)
             if self._max_seconds is not None:
                 params["max_seconds"] = float(self._max_seconds)
 
@@ -129,7 +151,8 @@ class PipelineWorker(QObject):
                 self.log_line.emit("載入 Mask2Former 模型(首次約需 30 秒)…")
 
             params_snapshot = {
-                "preset": "v7_baseline",
+                "preset": _BACKEND_PRESET.get(backend, "v7_baseline_params.json")
+                    .replace("_params.json", "").replace(".json", ""),
                 "mode": mode,
                 "crosswalk_backend": backend,
                 **params,
@@ -177,6 +200,11 @@ class PipelineWorker(QObject):
                     crosswalk_backend=backend,
                     yolo_seg_weights=project.meta.yolo_seg_weights,
                     yolo_seg_classes=None,  # 未來從 meta 讀
+                    yolo_seg_conf=float(params.get("yolo_seg_conf", 0.25)),
+                    yolo_seg_imgsz=int(params.get("yolo_seg_imgsz", 640)),
+                    yolo_seg_min_component_px=int(
+                        params.get("yolo_seg_min_component_px", 200)
+                    ),
                     progress_cb=cb,
                     cancel_event=self._cancel,
                 )
