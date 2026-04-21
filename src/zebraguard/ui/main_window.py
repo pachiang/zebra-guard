@@ -21,8 +21,11 @@ from PySide6.QtWidgets import (
 from zebraguard import __version__
 from zebraguard.core.project import Project
 from zebraguard.ui.import_view import ImportView
+from zebraguard.ui.parking_review_view import ParkingReviewView
 from zebraguard.ui.processing_view import ProcessingView
 from zebraguard.ui.review_view import ReviewView
+from zebraguard.ui.roi_editor_view import RoiEditorView
+from zebraguard.ui.static_stub_view import StaticStubView
 
 
 class MainWindow(QMainWindow):
@@ -88,15 +91,26 @@ class MainWindow(QMainWindow):
         self.import_view = ImportView()
         self.processing_view = ProcessingView()
         self.review_view = ReviewView()
+        self.parking_review_view = ParkingReviewView()
+        self.roi_editor_view = RoiEditorView()
+        self.static_stub_view = StaticStubView()
         self.stack.addWidget(self.import_view)
         self.stack.addWidget(self.processing_view)
         self.stack.addWidget(self.review_view)
+        self.stack.addWidget(self.parking_review_view)
+        self.stack.addWidget(self.roi_editor_view)
+        self.stack.addWidget(self.static_stub_view)
 
         self.import_view.project_created.connect(self._on_project_created)
+        self.import_view.static_project_created.connect(self._on_static_project_created)
         self.processing_view.completed.connect(self._on_analysis_done)
         self.processing_view.cancelled.connect(self._on_analysis_cancelled)
         self.review_view.request_close_project.connect(self.action_close_project)
         self.review_view.request_rerun.connect(self._on_rerun_requested)
+        self.parking_review_view.request_close_project.connect(self.action_close_project)
+        self.roi_editor_view.rois_saved.connect(self._on_rois_saved)
+        self.roi_editor_view.cancelled.connect(self.action_close_project)
+        self.static_stub_view.request_close_project.connect(self.action_close_project)
 
         root_layout.addWidget(self.stack, stretch=1)
         self.setCentralWidget(root)
@@ -154,12 +168,39 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.processing_view)
         self.processing_view.start(path)
 
+    def _on_static_project_created(self, project_path: str) -> None:
+        """違停(static mode)新專案建立 → 進 ROI 編輯器。"""
+        path = Path(project_path)
+        self._project_path = path
+        self._set_window_title(f"{path.stem}  ·  違停檢測 · ROI 編輯")
+        self.roi_editor_view.load_project(path)
+        self.stack.setCurrentWidget(self.roi_editor_view)
+
+    def _on_rois_saved(self, project_path: str) -> None:
+        """ROI 存完 → 跑違停檢測 pipeline。"""
+        path = Path(project_path)
+        self._project_path = path
+        self._set_window_title(f"{path.stem}  ·  違停檢測 · 分析中")
+        self.stack.setCurrentWidget(self.processing_view)
+        self.processing_view.start(path)
+
     def _on_analysis_done(self, project_path: str) -> None:
         path = Path(project_path)
         self._project_path = path
+        try:
+            proj = Project.load(path)
+            mode = proj.meta.mode or "dashcam"
+            proj.close()
+        except Exception:  # noqa: BLE001
+            mode = "dashcam"
+
         self._set_window_title(path.stem)
-        self.review_view.load_project(path)
-        self.stack.setCurrentWidget(self.review_view)
+        if mode == "static":
+            self.parking_review_view.load_project(path)
+            self.stack.setCurrentWidget(self.parking_review_view)
+        else:
+            self.review_view.load_project(path)
+            self.stack.setCurrentWidget(self.review_view)
 
     def _on_analysis_cancelled(self) -> None:
         self.action_close_project()
@@ -191,7 +232,9 @@ class MainWindow(QMainWindow):
         try:
             project = Project.load(proj_dir)
             stage = project.meta.progress.get("stage", "created")
+            mode = project.meta.mode or "dashcam"
             has_events = len(project.load_events()) > 0
+            parking_zones = list(project.meta.parking_zones or [])
             project.close()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "開啟失敗", f"無法開啟專案:\n{exc}")
@@ -200,11 +243,37 @@ class MainWindow(QMainWindow):
         self._project_path = proj_dir
         self._set_window_title(proj_dir.stem)
 
+        # Static mode(違停檢測)分流
+        if mode == "static":
+            if not parking_zones:
+                # 還沒畫 ROI → 編輯器
+                self.roi_editor_view.load_project(proj_dir)
+                self.stack.setCurrentWidget(self.roi_editor_view)
+            elif has_events or stage == "done":
+                # 已跑完 → ParkingReviewView
+                self.parking_review_view.load_project(proj_dir)
+                self.stack.setCurrentWidget(self.parking_review_view)
+            else:
+                # ROI 有、但還沒跑過 → 問使用者要不要直接開始分析
+                reply = QMessageBox.question(
+                    self,
+                    "開始分析?",
+                    "已畫好合法停車區但尚未分析。要現在開始分析嗎?",
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.stack.setCurrentWidget(self.processing_view)
+                    self.processing_view.start(proj_dir)
+                else:
+                    # ROI 有但選不跑 → 開 review(可能空清單,讓使用者自己決定)
+                    self.parking_review_view.load_project(proj_dir)
+                    self.stack.setCurrentWidget(self.parking_review_view)
+            return
+
+        # Dashcam 流程(既有)
         if has_events or stage == "done":
             self.review_view.load_project(proj_dir)
             self.stack.setCurrentWidget(self.review_view)
         else:
-            # 之前沒跑完 / 沒跑過 — 回到 import view 讓使用者決定是否重跑
             reply = QMessageBox.question(
                 self,
                 "重新分析?",
@@ -232,5 +301,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         # 清掉 decoder thread 等
         self.review_view.shutdown()
+        self.parking_review_view.shutdown()
         self.processing_view.shutdown()
+        self.roi_editor_view.shutdown()
+        self.static_stub_view.shutdown()
         super().closeEvent(event)

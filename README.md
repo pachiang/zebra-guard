@@ -29,7 +29,8 @@ zebra-guard/
 ## 文件索引
 
 - [架構](docs/architecture.md) — 元件、資料流、執行緒模型、專案檔格式
-- [三線路藍圖](docs/pipelines.md) — 斑馬線來源的三種策略(靜態 ROI / Mask2Former / YOLO-seg)、介面設計、分支策略
+- [三線路藍圖](docs/pipelines.md) — 未禮讓檢測的斑馬線來源策略(Mask2Former / YOLO-seg)、介面設計、分支策略
+- [違停檢測藍圖](docs/parking_detection_plan.md) — 獨立的第二條功能線(靜態攝影機 + ROI + 使用者標籤)
 - [MVP 功能清單](docs/mvp.md) — P0 / P1 / Phase 2 / Phase 3
 - [法規依據](docs/legal-rules.md) — 未禮讓行人、三枕木紋、違規判定條件
 - [隱私聲明](docs/privacy.md) — 使用者面向

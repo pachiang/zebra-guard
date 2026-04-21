@@ -36,14 +36,18 @@ import numpy as np
 import torch
 from PIL import Image
 
+# 讓這支 script 即使被直接執行(不透過 python -m zebraguard)也能 import
+# zebraguard package
+_SRC_DIR = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+from zebraguard.ml.exceptions import Cancelled  # noqa: E402,F401 — 共用,對外 re-export
+
 # progress_cb(stage: str, current: int, total: int, hits: int) -> None
 #   stage ∈ {"loading_mask", "loading_yolo", "analyzing", "annotating", "done"}
 #   current/total 的單位由 stage 決定:analyzing 為 frame index;annotating 為已寫入幀
 ProgressCallback = Callable[[str, int, int, int], None]
-
-
-class Cancelled(Exception):
-    """Raised internally when cancel_event is set. Caller should catch this."""
 
 ROOT = Path(__file__).resolve().parent.parent
 

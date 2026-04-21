@@ -150,7 +150,7 @@ v7 結果:25 events / 276 hits / 34.0s flagged (5.7% of 10min)
 
 ### 已做決定(避免重複討論)
 
-- Static mode 不在 MVP 範圍;是三線架構的**預留插槽**,UI 會有 mode 選擇,但實作晚於 YOLO-seg
+- Static mode 不在未禮讓檢測 MVP 範圍。但 Static mode 會作為**第二條獨立功能「違停檢測」**的載體接回來,見 `docs/parking_detection_plan.md`。兩者共用 UI 殼 / Project / export,各有各的 pipeline 與 Review 標籤。
 - Mainline Mask2Former 效果可接受,不改參數也不改模型。YOLO-seg 是為了讓無 GPU 使用者可用;品質可略差
 - UI 走同一套 review / export;Project 新增 `mode` + `crosswalk_backend` 兩欄以便重現
 - `core/worker.py` 目前以 importlib 載入 `scripts/zero_shot_detect.py`。抽介面後,worker 改成直接 import `zebraguard.ml.crosswalk` + 本地的 pipeline runner;`scripts/zero_shot_detect.py` 保留為 CLI shim

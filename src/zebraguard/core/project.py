@@ -91,6 +91,10 @@ def _migrate_events_table(conn: sqlite3.Connection) -> None:
     existing = {row[1] for row in cur.fetchall()}
     if "license_plate" not in existing:
         conn.execute("ALTER TABLE events ADD COLUMN license_plate TEXT")
+    if "user_label" not in existing:
+        # 違停檢測用:parallel_park / intersection / other_violation /
+        # red_light / legal_elsewhere / ignore;未標時為 NULL
+        conn.execute("ALTER TABLE events ADD COLUMN user_label TEXT")
     conn.commit()
 
 _VIDEO_HASH_BYTES = 8 * 1024 * 1024  # 前 8 MB,對 12 小時影片全 hash 太慢
@@ -112,6 +116,13 @@ class ProjectMeta:
     # YOLO-seg 權重路徑(僅當 crosswalk_backend=yolo_seg 時使用;可為空 →
     # UI 會在開始分析前要求使用者選一個)
     yolo_seg_weights: str = ""
+    # Static mode(違停檢測)專用:**違法區**多邊形列表(紅黃線、人行道、禁停
+    # 區等)。車輛 bbox 底邊 strip 主要落在任一違法區內 → 候選。
+    # 座標是影片原始像素(非 UI 縮放後)。每個 polygon = list of [x, y]。
+    no_parking_zones: list[list[list[float]]] = field(default_factory=list)
+    # 停留判定閾值(static mode)— 可在 ROI 編輯器的進階設定調整
+    stopped_threshold_sec: float = 60.0
+    stopped_max_displacement_px: float = 20.0
     video_path: str = ""
     video_sha256_partial: str = ""  # 前 8 MB 的 SHA256;為身分識別而非完整校驗
     video_fps: float = 0.0
@@ -265,6 +276,33 @@ class Project:
         self.meta.progress = {"stage": stage, **extra}
         self._save_meta()
 
+    def save_no_parking_zones(self, zones: list[list[list[float]]]) -> None:
+        """靜態違停檢測 — 儲存使用者在 ROI 編輯器畫的**違法區**多邊形。
+
+        zones 為 list of polygon;每個 polygon 是 list of [x, y](影像像素座標)。
+        車輛 bbox 底邊 strip 主要落在任一違法區內 → 候選。
+        """
+        normalised: list[list[list[float]]] = []
+        for poly in zones:
+            pts = [[float(p[0]), float(p[1])] for p in poly if len(p) >= 2]
+            if len(pts) >= 3:
+                normalised.append(pts)
+        self.meta.no_parking_zones = normalised
+        self._save_meta()
+
+    def save_static_thresholds(
+        self,
+        *,
+        stopped_threshold_sec: float,
+        stopped_max_displacement_px: float,
+    ) -> None:
+        """違停檢測進階設定(ROI 編輯器裡改的兩個門檻)。"""
+        self.meta.stopped_threshold_sec = max(1.0, float(stopped_threshold_sec))
+        self.meta.stopped_max_displacement_px = max(
+            0.0, float(stopped_max_displacement_px)
+        )
+        self._save_meta()
+
     # ---- Violations ---------------------------------------------------------
 
     def save_violations(self, violations: list[ViolationEvent]) -> None:
@@ -353,11 +391,12 @@ class Project:
             )
 
     def load_events(self) -> list[dict[str, Any]]:
-        """含 id、user_status、user_note、license_plate;ped/veh_track_ids 已 JSON parsed。"""
+        """含 id / user_status / user_note / license_plate / user_label;
+        ped/veh_track_ids 已 JSON parsed。"""
         cur = self._conn.execute(
             """SELECT id, start_frame, end_frame, start_sec, end_sec,
                       min_distance_px, peak_speed_px, ped_track_ids, veh_track_ids,
-                      user_status, user_note, license_plate
+                      user_status, user_note, license_plate, user_label
                FROM events ORDER BY start_sec, id"""
         )
         cols = [c[0] for c in cur.description]
@@ -373,6 +412,20 @@ class Project:
         with self._conn:
             cur = self._conn.execute(
                 "UPDATE events SET license_plate = ? WHERE id = ?",
+                (normalised, event_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"找不到 event id={event_id}")
+
+    def update_event_label(self, event_id: int, label: str | None) -> None:
+        """違停檢測用:儲存使用者的分類 label(見 parking_review_view.PARKING_LABELS)。
+
+        空字串 / None 視同清空(回到未審)。
+        """
+        normalised = (label or "").strip() or None
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE events SET user_label = ? WHERE id = ?",
                 (normalised, event_id),
             )
             if cur.rowcount == 0:

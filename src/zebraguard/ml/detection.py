@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import Any
 
 import cv2
 
+from zebraguard.ml.exceptions import Cancelled
 from zebraguard.ml.types import COCO_PERSON, DEFAULT_VEHICLE_CLASSES, Detection
 
 
@@ -58,12 +60,18 @@ def track_video(
     classes: set[int] | frozenset[int] | None = None,
     conf: float = 0.3,
     vid_stride: int = 1,
+    imgsz: int = 640,
+    max_frames: int | None = None,
     on_progress: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[VideoInfo, list[Detection]]:
     """跑偵測 + 追蹤,回傳整支影片的所有 tracked detections(扁平)。
 
     進度:`on_progress(current_frame_idx, total_frame_count)`,
     大約每秒呼叫一次,結束時額外呼叫一次 (total, total)。
+
+    `cancel_event`:set 時下一次迴圈迭代丟 `Cancelled`。
+    `max_frames`:若設,超過此 frame_idx 就停。
     """
     from ultralytics import YOLO  # 延遲匯入:純數學測試不需要此依賴
 
@@ -79,6 +87,7 @@ def track_video(
         tracker=tracker,
         classes=sorted(classes),
         conf=conf,
+        imgsz=imgsz,
         vid_stride=vid_stride,
         verbose=False,
     )
@@ -87,7 +96,11 @@ def track_video(
     progress_interval = max(1, int(round(info.fps)) if info.fps > 0 else 30)
 
     for i, result in enumerate(results_iter):
+        if cancel_event is not None and cancel_event.is_set():
+            raise Cancelled()
         frame_idx = i * vid_stride
+        if max_frames is not None and frame_idx >= max_frames:
+            break
         time_sec = frame_idx / info.fps if info.fps > 0 else 0.0
 
         boxes = getattr(result, "boxes", None)
